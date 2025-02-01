@@ -1,0 +1,3 @@
+[+] Found: http://testphp.vulnweb.com/admin (200)
+[+] Found: http://testphp.vulnweb.com/index.php (200)
+[+] Found: http://testphp.vulnweb.com/images (200)
